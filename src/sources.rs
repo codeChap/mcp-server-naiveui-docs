@@ -6,21 +6,21 @@ use anyhow::{Result, bail};
 /// Override with `NAIVE_UI_MCP_REV` (tag `v2.45.3`, SHA, or HEAD/main).
 pub const NAIVE_UI_PINNED_REV: &str = "v2.40.4";
 
-#[allow(dead_code)]
 pub const REMOTE_GIT: &str = "https://github.com/tusen-ai/naive-ui.git";
 pub const REMOTE_ID: &str = "naive-ui";
 
 /// jsDelivr listing (sync last resort). Per-file CDN, not a tarball.
-#[allow(dead_code)]
 pub const JSDELIVR_LIST_TEMPLATE: &str =
     "https://data.jsdelivr.com/v1/packages/gh/tusen-ai/naive-ui@{rev}";
 /// jsDelivr file URL. Never a `.tar.gz` — that path is HTTP 400.
-#[allow(dead_code)]
 pub const JSDELIVR_FILE_TEMPLATE: &str =
     "https://cdn.jsdelivr.net/gh/tusen-ai/naive-ui@{rev}/{path}";
 
+pub fn clone_dir(cache: &Path) -> PathBuf {
+    cache.join("src").join(REMOTE_ID)
+}
+
 /// GitHub archive fallback (sync only). Tag vs SHA use different paths.
-#[allow(dead_code)]
 pub fn archive_url(rev: &str) -> Option<String> {
     if looks_like_sha(rev) {
         Some(format!(
@@ -35,14 +35,12 @@ pub fn archive_url(rev: &str) -> Option<String> {
     }
 }
 
-#[allow(dead_code)]
-fn looks_like_sha(rev: &str) -> bool {
+pub(crate) fn looks_like_sha(rev: &str) -> bool {
     let n = rev.len();
     (7..=40).contains(&n) && rev.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-#[allow(dead_code)]
-fn is_unpinned(rev: &str) -> bool {
+pub(crate) fn is_unpinned(rev: &str) -> bool {
     matches!(
         rev.to_ascii_lowercase().as_str(),
         "head" | "main" | "master"
@@ -163,7 +161,6 @@ fn is_world_writable(_path: &Path) -> bool {
 }
 
 /// Relative path under a clone (demo file names). Rejects traversal.
-#[allow(dead_code)]
 pub fn is_safe_rel(rel: &str) -> bool {
     if rel.is_empty() || rel.contains('\0') {
         return false;

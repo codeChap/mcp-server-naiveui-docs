@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-# Protocol smoke test: initialize + tools/list. No network.
+# Protocol smoke test: initialize + tools/list + naive_status. No network.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-CACHE="${PWD}/target/stdio-test-cache"
-mkdir -p "$CACHE"
-chmod 755 "$CACHE" 2>/dev/null || true
+CACHE="${PWD}/tests/fixtures/tree"
+chmod 755 tests/fixtures "$CACHE" 2>/dev/null || true
 
 OUT="${PWD}/target/stdio-test.out"
 ERR="${PWD}/target/stdio-test.err"
 mkdir -p target
 
-NAIVE_UI_MCP_CACHE="$CACHE" cargo run --quiet >"$OUT" 2>"$ERR" <<'EOF'
+env -u NAIVE_UI_MCP_REV -u NAIVE_UI_MCP_SYNC_ON_START \
+  NAIVE_UI_MCP_CACHE="$CACHE" cargo run --quiet >"$OUT" 2>"$ERR" <<'EOF'
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0.0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/list"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"naive_status","arguments":{}}}
 EOF
 
 fail=0
@@ -38,6 +39,10 @@ absent() {
 echo "stdio protocol:"
 check "initialize server name naive-ui" '"name"[[:space:]]*:[[:space:]]*"naive-ui"'
 check "tools/list includes naive_status" '"name"[[:space:]]*:[[:space:]]*"naive_status"'
+# tools/call wraps the payload in a JSON string, so keys are escaped (`\"gotchas\": 1`).
+check "naive_status gotchas" 'gotchas'
+check "naive_status origin archive" 'archive'
+check "naive_status pin_match" 'pin_match'
 
 for tool in naive_sync naive_list naive_search naive_component naive_prop naive_demo naive_theme naive_discrete naive_get; do
   absent "$tool" "\"name\"[[:space:]]*:[[:space:]]*\"${tool}\""
