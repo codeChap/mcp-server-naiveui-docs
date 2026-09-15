@@ -61,11 +61,9 @@ impl DemoRef {
     /// Naive `resolveDemoInfos`: `.vue` in the fence id → `{stem}.demo.vue`, else `{id}.demo.md`.
     pub fn from_fence_id(fence_id: &str) -> Self {
         let debug = fence_id.contains("debug") || fence_id.contains("Debug");
-        let file_name = if fence_id.contains(".vue") {
-            let stem_end = fence_id.len().saturating_sub(4);
-            format!("{}.demo.vue", &fence_id[..stem_end])
-        } else {
-            format!("{fence_id}.demo.md")
+        let file_name = match fence_id.strip_suffix(".vue") {
+            Some(stem) => format!("{stem}.demo.vue"),
+            None => format!("{fence_id}.demo.md"),
         };
         Self {
             fence_id: fence_id.to_string(),
@@ -145,18 +143,9 @@ enum Section {
     Description,
     Demos,
     ApiContainer,
-    Api(ApiDraft),
-    CreateDiscrete { heading: String },
+    Api(ApiSection),
     Qa,
     Extra { heading: String },
-}
-
-struct ApiDraft {
-    heading: String,
-    kind: ApiKind,
-    owners: Vec<String>,
-    columns: Vec<String>,
-    rows: Vec<Vec<String>>,
 }
 
 struct Parser<'a> {
@@ -283,22 +272,16 @@ impl<'a> Parser<'a> {
         if depth == 2 {
             self.section = start_h2(heading);
             let owners = match &self.section {
-                Section::Api(draft) => draft.owners.clone(),
+                Section::Api(sec) => sec.owners.clone(),
                 _ => Vec::new(),
             };
             push_unique(&mut self.components, &owners);
             return;
         }
         // H3–H4: API tables are not parented on ## API (config-consumer Events/Slots).
-        if heading == "createDiscreteApi" || heading.starts_with("createDiscreteApi ") {
-            self.section = Section::CreateDiscrete {
-                heading: heading.to_string(),
-            };
-            return;
-        }
         let (kind, owners) = classify_api_heading(heading);
         push_unique(&mut self.components, &owners);
-        self.section = Section::Api(ApiDraft {
+        self.section = Section::Api(ApiSection {
             heading: heading.to_string(),
             kind,
             owners,
@@ -315,8 +298,7 @@ impl<'a> Parser<'a> {
             return;
         }
         let api_heading = match &self.section {
-            Section::Api(draft) => Some(draft.heading.clone()),
-            Section::CreateDiscrete { heading } => Some(heading.clone()),
+            Section::Api(sec) => Some(sec.heading.clone()),
             _ => None,
         };
         if is_ts_js(lang)
@@ -342,8 +324,8 @@ impl<'a> Parser<'a> {
             return i + 1;
         };
         if matches!(self.section, Section::Api(_)) {
-            if let Section::Api(draft) = &mut self.section {
-                apply_table(draft, parsed);
+            if let Section::Api(sec) = &mut self.section {
+                apply_table(sec, parsed);
             }
             return next;
         }
@@ -358,18 +340,16 @@ impl<'a> Parser<'a> {
 
     fn finalize(&mut self) {
         match std::mem::replace(&mut self.section, Section::Start) {
-            Section::Api(draft) => {
-                if draft.kind == ApiKind::Other && draft.columns.is_empty() && draft.rows.is_empty()
-                {
-                    // Grouping headings such as "MessageProvider Injection API".
-                } else {
-                    self.apis.push(ApiSection {
-                        heading: draft.heading,
-                        owners: draft.owners,
-                        kind: draft.kind,
-                        columns: draft.columns,
-                        rows: draft.rows,
-                    });
+            Section::Api(sec) => {
+                let empty = sec.columns.is_empty() && sec.rows.is_empty();
+                let skip_other = sec.kind == ApiKind::Other && empty;
+                // Fence-only Type lives in extra_types; empty Type ApiSection is for
+                // alert/prose with neither table nor fence (FormValidateMessages).
+                let skip_fence_only_type = sec.kind == ApiKind::Type
+                    && empty
+                    && self.extra_types.iter().any(|t| t.heading == sec.heading);
+                if !skip_other && !skip_fence_only_type {
+                    self.apis.push(sec);
                 }
             }
             Section::Extra { heading } => {
@@ -426,7 +406,7 @@ fn start_h2(heading: &str) -> Section {
     }
     if let Some(kind) = api_kind_suffix(heading) {
         let owners = owners_from_heading(heading, kind);
-        return Section::Api(ApiDraft {
+        return Section::Api(ApiSection {
             heading: heading.to_string(),
             kind,
             owners,
@@ -488,31 +468,39 @@ fn owners_from_heading(heading: &str, kind: ApiKind) -> Vec<String> {
         .collect()
 }
 
-fn apply_table(draft: &mut ApiDraft, parsed: Vec<Vec<String>>) {
+fn apply_table(sec: &mut ApiSection, parsed: Vec<Vec<String>>) {
     if parsed.is_empty() {
         return;
     }
-    if !draft.columns.is_empty() {
+    if !sec.columns.is_empty() {
         tracing::warn!(
-            heading = draft.heading.as_str(),
+            heading = sec.heading.as_str(),
             "extra table under API heading ignored"
         );
         return;
     }
-    draft.columns = parsed[0].clone();
-    let n = draft.columns.len();
-    draft.rows = parsed
+    sec.columns = parsed[0].clone();
+    let n = sec.columns.len();
+    sec.rows = parsed
         .into_iter()
         .skip(1)
-        .map(|row| pad_row(row, n))
+        .map(|mut row| {
+            if row.len() != n {
+                tracing::warn!(
+                    heading = sec.heading.as_str(),
+                    row_len = row.len(),
+                    columns = n,
+                    "table row column count mismatch"
+                );
+            }
+            if row.len() < n {
+                row.resize(n, String::new());
+            } else if row.len() > n {
+                row.truncate(n);
+            }
+            row
+        })
         .collect();
-}
-
-fn pad_row(mut row: Vec<String>, n: usize) -> Vec<String> {
-    while row.len() < n {
-        row.push(String::new());
-    }
-    row
 }
 
 fn site_url(id: &str, kind: PageKind, source_path: &str) -> String {

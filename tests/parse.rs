@@ -314,6 +314,13 @@ fn message_qa_and_alerts() {
             .iter()
             .any(|t| t.heading.contains("MessageRenderMessage"))
     );
+    assert!(
+        !page
+            .apis
+            .iter()
+            .any(|s| s.heading.contains("MessageRenderMessage")),
+        "fence-only Type is extra_types, not an empty ApiSection"
+    );
 }
 
 #[test]
@@ -338,8 +345,71 @@ fn data_table_column_fixed_quotes_not_rewritten() {
     let cols = section(&page, "DataTableColumn Properties");
     let fixed = row_named(cols, "fixed");
     assert!(
-        fixed[1].contains("'left | 'right' | false") || fixed[1].contains("'left"),
+        fixed[1].contains("'left | 'right' | false"),
         "pass through broken quotes: {}",
         fixed[1]
+    );
+}
+
+#[test]
+fn menu_option_key_and_dropdown_placement_single_cell() {
+    let page = parse_id("menu");
+    let opts = section(&page, "MenuOption Properties");
+    let key = row_named(opts, "key");
+    assert_eq!(key[0], "key");
+
+    let props = section(&page, "Menu Props");
+    let drop = row_named(props, "dropdown-placement");
+    assert_eq!(drop.len(), props.columns.len());
+    assert_eq!(drop.len(), 5);
+    assert!(
+        drop[1].contains("'top-start'") && drop[1].contains("'left-end'"),
+        "type cell should stay one cell: {}",
+        drop[1]
+    );
+    assert!(
+        !drop[1].contains("\\|"),
+        "escaped pipes should be unescaped"
+    );
+}
+
+#[test]
+fn malformed_table_does_not_panic() {
+    let md = r#"# Broken
+
+## API
+
+### Broken Props
+
+| Name | Type | Default
+| a | `'x' \| 'y'`
+|
+| short |
+| extra | 1 | 2 | 3 | 4 | 5 |
+
+| Second | Table |
+| --- | --- |
+| x | y |
+"#;
+    let page = parse_page("broken", md, "src/broken/demos/enUS/index.demo-entry.md");
+    assert_eq!(page.title, "Broken");
+    let props = section(&page, "Broken Props");
+    assert_eq!(props.columns, vec!["Name", "Type", "Default"]);
+    assert!(
+        props.rows.iter().all(|r| r.len() == 3),
+        "rows padded/truncated to header width: {:?}",
+        props.rows
+    );
+    let a = row_named(props, "a");
+    assert!(a[1].contains("'x' | 'y'"), "unescaped: {}", a[1]);
+    let short = row_named(props, "short");
+    assert_eq!(short.len(), 3);
+    assert_eq!(short[1], "");
+    assert_eq!(short[2], "");
+    let extra = row_named(props, "extra");
+    assert_eq!(extra, ["extra", "1", "2"]);
+    assert!(
+        !props.columns.iter().any(|c| c == "Second"),
+        "second table under the same heading is ignored"
     );
 }

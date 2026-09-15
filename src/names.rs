@@ -84,15 +84,6 @@ pub enum Resolve {
     None,
 }
 
-impl Resolve {
-    pub fn id(&self) -> Option<&str> {
-        match self {
-            Resolve::Hit(id) => Some(id),
-            Resolve::Candidates(_) | Resolve::None => None,
-        }
-    }
-}
-
 /// Strip `n-` / `N` prefix, lowercase, collapse `[-_ ]` to hyphens, then
 /// (a) exact kebab, (b) exact pascal, (c) unique prefix, (d) Levenshtein ≤ 2.
 pub fn resolve(query: &str, kebab_ids: &[&str]) -> Resolve {
