@@ -96,14 +96,14 @@ fn raw_cache_dir() -> Result<PathBuf> {
 }
 
 fn finalize_cache_path(path: PathBuf) -> Result<PathBuf> {
-    let path = normalize_lexically(&path);
-    if path.as_os_str().is_empty() {
-        bail!("cache path is empty; set NAIVE_UI_MCP_CACHE to a private directory");
-    }
     let path = match std::path::absolute(&path) {
         Ok(p) => p,
         Err(e) => bail!("cannot resolve cache path {}: {e}", path.display()),
     };
+    let path = normalize_lexically(&path);
+    if path.as_os_str().is_empty() {
+        bail!("cache path is empty; set NAIVE_UI_MCP_CACHE to a private directory");
+    }
     let path = if path.exists() {
         path.canonicalize().unwrap_or(path)
     } else {
@@ -268,6 +268,31 @@ mod tests {
             let _env = EnvRestore::set("NAIVE_UI_MCP_CACHE", rel);
             cache_dir().expect_err(&format!("NAIVE_UI_MCP_CACHE={rel} with cwd /tmp must fail"));
         }
+    }
+
+    #[test]
+    fn relative_climb_from_manifest_into_tmp_bails() {
+        let _g = ENV_LOCK.lock().expect("env lock");
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut rel = PathBuf::new();
+        for c in manifest.components() {
+            if matches!(c, Component::Normal(_)) {
+                rel.push("..");
+            }
+        }
+        rel.push("tmp");
+        rel.push("naive-ui-rel-escape-a45cbd00");
+        rel.push("x");
+        let _env = EnvRestore::set(
+            "NAIVE_UI_MCP_CACHE",
+            rel.to_str().expect("utf-8 relative cache path"),
+        );
+        let err = cache_dir().expect_err("relative climb into /tmp must fail");
+        let msg = format!("{err:#}").to_lowercase();
+        assert!(
+            msg.contains("tmp") || msg.contains("forbidden") || msg.contains("world-writable"),
+            "{msg}"
+        );
     }
 
     #[test]
