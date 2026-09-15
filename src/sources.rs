@@ -35,7 +35,6 @@ pub fn archive_url(rev: &str) -> Option<String> {
     }
 }
 
-/// SHA: 7–40 hex chars. Unpinned: HEAD/main/master (any case).
 #[allow(dead_code)]
 fn looks_like_sha(rev: &str) -> bool {
     let n = rev.len();
@@ -98,6 +97,13 @@ fn raw_cache_dir() -> Result<PathBuf> {
 
 fn finalize_cache_path(path: PathBuf) -> Result<PathBuf> {
     let path = normalize_lexically(&path);
+    if path.as_os_str().is_empty() {
+        bail!("cache path is empty; set NAIVE_UI_MCP_CACHE to a private directory");
+    }
+    let path = match std::path::absolute(&path) {
+        Ok(p) => p,
+        Err(e) => bail!("cannot resolve cache path {}: {e}", path.display()),
+    };
     let path = if path.exists() {
         path.canonicalize().unwrap_or(path)
     } else {
@@ -188,21 +194,53 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn set_var(key: &str, val: Option<&str>) {
-        // ENV_LOCK serializes process-global env for these tests.
+        // SAFETY: callers must hold ENV_LOCK.
         match val {
             Some(v) => unsafe { std::env::set_var(key, v) },
             None => unsafe { std::env::remove_var(key) },
         }
     }
 
+    struct EnvRestore {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            set_var(key, Some(val));
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            set_var(self.key, self.prev.as_deref());
+        }
+    }
+
+    struct CwdRestore(PathBuf);
+
+    impl CwdRestore {
+        fn chdir(path: &Path) -> Self {
+            let prev = std::env::current_dir().expect("cwd");
+            std::env::set_current_dir(path).expect("chdir");
+            Self(prev)
+        }
+    }
+
+    impl Drop for CwdRestore {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+
     #[test]
     fn naive_ui_mcp_cache_tmp_bails() {
         let _g = ENV_LOCK.lock().expect("env lock");
-        let prev = std::env::var("NAIVE_UI_MCP_CACHE").ok();
-        set_var("NAIVE_UI_MCP_CACHE", Some("/tmp"));
-        let result = cache_dir();
-        set_var("NAIVE_UI_MCP_CACHE", prev.as_deref());
-        let err = result.expect_err("NAIVE_UI_MCP_CACHE=/tmp must fail");
+        let _env = EnvRestore::set("NAIVE_UI_MCP_CACHE", "/tmp");
+        let err = cache_dir().expect_err("NAIVE_UI_MCP_CACHE=/tmp must fail");
         let msg = format!("{err:#}").to_lowercase();
         assert!(
             msg.contains("tmp") || msg.contains("forbidden") || msg.contains("world-writable"),
@@ -213,16 +251,23 @@ mod tests {
     #[test]
     fn naive_ui_mcp_cache_tmp_naive_ui_bails() {
         let _g = ENV_LOCK.lock().expect("env lock");
-        let prev = std::env::var("NAIVE_UI_MCP_CACHE").ok();
-        set_var("NAIVE_UI_MCP_CACHE", Some("/tmp/naive-ui"));
-        let result = cache_dir();
-        set_var("NAIVE_UI_MCP_CACHE", prev.as_deref());
-        let err = result.expect_err("NAIVE_UI_MCP_CACHE=/tmp/naive-ui must fail");
+        let _env = EnvRestore::set("NAIVE_UI_MCP_CACHE", "/tmp/naive-ui");
+        let err = cache_dir().expect_err("NAIVE_UI_MCP_CACHE=/tmp/naive-ui must fail");
         let msg = format!("{err:#}").to_lowercase();
         assert!(
             msg.contains("tmp") || msg.contains("forbidden") || msg.contains("world-writable"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn relative_cache_under_tmp_cwd_bails() {
+        let _g = ENV_LOCK.lock().expect("env lock");
+        let _cwd = CwdRestore::chdir(Path::new("/tmp"));
+        for rel in [".", "./.", "foo/..", "naive-ui-rel"] {
+            let _env = EnvRestore::set("NAIVE_UI_MCP_CACHE", rel);
+            cache_dir().expect_err(&format!("NAIVE_UI_MCP_CACHE={rel} with cwd /tmp must fail"));
+        }
     }
 
     #[test]
@@ -232,6 +277,38 @@ mod tests {
         assert!(finalize_cache_path(PathBuf::from("/var/tmp/x")).is_err());
         assert!(finalize_cache_path(PathBuf::from("/dev/shm/x")).is_err());
         assert!(finalize_cache_path(PathBuf::from("/tmp/../tmp")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn world_writable_parent_bails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _g = ENV_LOCK.lock().expect("env lock");
+        let parent = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("ww-cache-parent");
+        std::fs::create_dir_all(&parent).expect("mkdir ww parent");
+        let orig = std::fs::metadata(&parent)
+            .expect("stat ww parent")
+            .permissions();
+        struct ModeRestore(PathBuf, std::fs::Permissions);
+        impl Drop for ModeRestore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, self.1.clone());
+            }
+        }
+        let _mode = ModeRestore(parent.clone(), orig);
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777))
+            .expect("chmod 0777");
+        let cache = parent.join("cache");
+        let _env = EnvRestore::set(
+            "NAIVE_UI_MCP_CACHE",
+            cache.to_str().expect("utf-8 cache path"),
+        );
+        let err = cache_dir().expect_err("world-writable parent must fail");
+        let msg = format!("{err:#}").to_lowercase();
+        assert!(msg.contains("world-writable"), "{msg}");
     }
 
     #[test]
