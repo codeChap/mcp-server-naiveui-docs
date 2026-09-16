@@ -1,7 +1,10 @@
 //! Utf-8-safe string clipping. Never byte-slice serialized JSON.
-#![allow(dead_code)]
 
 use serde_json::{Map, Value};
+
+pub const SNIPPET_LIMIT: usize = 280;
+pub const BODY_LIMIT: usize = 24_000;
+pub const JSON_CAP: usize = 48_000;
 
 pub fn clip(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
@@ -25,7 +28,7 @@ pub fn clip_with_flag(s: &str, max_bytes: usize) -> (String, bool) {
 const CLIP_KEYS: &[&str] = &["description", "qa_markdown", "body", "markdown", "snippet"];
 const OMIT_KEYS: &[&str] = &["extra_types", "qa_markdown", "alerts", "extra_sections"];
 
-fn pretty_len(v: &Value) -> usize {
+pub fn pretty_len(v: &Value) -> usize {
     serde_json::to_string_pretty(v)
         .map(|s| s.len())
         .unwrap_or(usize::MAX)

@@ -7,13 +7,15 @@ use std::sync::LazyLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
+use serde::Serialize;
 use walkdir::{DirEntry, WalkDir};
 
-use crate::names::Names;
+use crate::clip::{SNIPPET_LIMIT, clip_with_flag};
+use crate::names::{Names, Resolve, fold_ident, resolve};
 use crate::parse::{ApiKind, Page, PageKind, extract_demo_title, parse_page};
 use crate::sources::{REMOTE_ID, clone_dir, is_safe_rel};
 
-const GOTCHAS_MD: &str = include_str!("../data/gotchas.md");
+pub(crate) const GOTCHAS_MD: &str = include_str!("../data/gotchas.md");
 const CATEGORIES_JSON: &str = include_str!("../data/categories.json");
 
 static PASCAL_EXPORT: LazyLock<Regex> =
@@ -39,7 +41,6 @@ const EXTRA_ALIASES: &[(&str, &str)] = &[
 ];
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PropHit {
     pub page_id: String,
     pub heading: String,
@@ -47,18 +48,54 @@ pub struct PropHit {
     pub row: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchHit {
+    pub id: String,
+    pub score: u32,
+    pub kind: PageKind,
+    pub title: String,
+    pub tag: Option<String>,
+    pub pascal: Option<String>,
+    pub site_url: String,
+    pub snippet: String,
+    #[serde(rename = "match")]
+    pub match_kind: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ListRow {
+    pub id: String,
+    pub tag: String,
+    pub pascal: String,
+    pub title: String,
+    pub kind: PageKind,
+    pub category: String,
+    pub site_url: String,
+    pub demo_count: usize,
+    pub prop_count: usize,
+}
+
+#[derive(Debug)]
+pub enum PageResolve<'a> {
+    Hit {
+        page: &'a Page,
+        owner: Option<String>,
+    },
+    Candidates(Vec<String>),
+    None {
+        did_you_mean: Vec<String>,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct Catalog {
     pub pages: Vec<Page>,
     pub missing: Vec<String>,
     pub built_at: u64,
-    #[allow(dead_code)]
     pub by_id: HashMap<String, usize>,
-    #[allow(dead_code)]
     pub by_tag: HashMap<String, usize>,
-    #[allow(dead_code)]
     pub by_pascal: HashMap<String, usize>,
-    #[allow(dead_code)]
     pub props: HashMap<String, Vec<PropHit>>,
 }
 
@@ -129,7 +166,6 @@ impl Catalog {
             .count()
     }
 
-    #[allow(dead_code)]
     pub fn get(&self, id: &str) -> Option<&Page> {
         let idx = self
             .by_id
@@ -137,6 +173,125 @@ impl Catalog {
             .or_else(|| self.by_tag.get(id))
             .or_else(|| self.by_pascal.get(id))?;
         self.pages.get(*idx)
+    }
+
+    pub fn resolve_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.pages.iter().map(|p| p.id.clone()).collect();
+        for page in &self.pages {
+            for owner in &page.components {
+                let n = Names::from_heading(owner);
+                if n.kebab != "a" {
+                    ids.push(n.kebab);
+                }
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    pub fn resolve_page(&self, name: &str) -> PageResolve<'_> {
+        if let Some(page) = self.get(name) {
+            return PageResolve::Hit {
+                owner: owner_filter_for(page, name),
+                page,
+            };
+        }
+        let ids = self.resolve_ids();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        match resolve(name, &refs) {
+            Resolve::Hit(id) => match self.get(&id) {
+                Some(page) => PageResolve::Hit {
+                    owner: owner_filter_for(page, name),
+                    page,
+                },
+                None => PageResolve::None {
+                    did_you_mean: vec![id],
+                },
+            },
+            Resolve::Candidates(c) => PageResolve::Candidates(c),
+            Resolve::None => PageResolve::None {
+                did_you_mean: Vec::new(),
+            },
+        }
+    }
+
+    pub fn list_rows(
+        &self,
+        category: Option<&str>,
+        kind: Option<PageKind>,
+        query: Option<&str>,
+    ) -> Vec<ListRow> {
+        let q = query
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_lowercase);
+        let mut rows: Vec<ListRow> = self
+            .pages
+            .iter()
+            .filter(|p| kind.is_none_or(|k| p.kind == k))
+            .filter(|p| category.is_none_or(|c| category_matches(&p.category, c)))
+            .filter(|p| q.as_deref().is_none_or(|qq| list_query_hit(p, qq)))
+            .map(list_row)
+            .collect();
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        rows
+    }
+
+    pub fn search(
+        &self,
+        query: &str,
+        kind: Option<PageKind>,
+        limit: usize,
+    ) -> (Vec<SearchHit>, bool) {
+        let tokens: Vec<String> = query
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .filter(|t| t.len() > 1)
+            .collect();
+        if tokens.is_empty() {
+            return (Vec::new(), false);
+        }
+        let q_debug = query.to_ascii_lowercase().contains("debug");
+        let mut scored: Vec<SearchHit> = self
+            .pages
+            .iter()
+            .filter(|p| kind.is_none_or(|k| p.kind == k))
+            .filter_map(|p| score_page(p, &tokens, q_debug))
+            .collect();
+        // Prop-name hits outrank body/gotchas so `remote` surfaces data-table first.
+        scored.sort_by(|a, b| {
+            let ap = a.match_kind.starts_with("prop:");
+            let bp = b.match_kind.starts_with("prop:");
+            bp.cmp(&ap)
+                .then_with(|| b.score.cmp(&a.score))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let truncated_hits = scored.len() > limit;
+        scored.truncate(limit);
+        (scored, truncated_hits)
+    }
+
+    pub fn lookup_props(&self, name: &str) -> Vec<&PropHit> {
+        let raw = name.trim();
+        if raw.is_empty() {
+            return Vec::new();
+        }
+        let key = raw.to_ascii_lowercase();
+        let folded = fold_prop(raw);
+        let mut out: Vec<&PropHit> = Vec::new();
+        if let Some(hits) = self.props.get(&key) {
+            out.extend(hits);
+        }
+        for (k, hits) in &self.props {
+            if k == &key {
+                continue;
+            }
+            if fold_prop(k) == folded {
+                out.extend(hits);
+            }
+        }
+        out
     }
 }
 
@@ -410,14 +565,242 @@ fn fill_indexes(catalog: &mut Catalog) {
     }
 }
 
-#[cfg(test)]
-fn category_slug(group: &str) -> String {
+pub(crate) fn category_slug(group: &str) -> String {
     let lower = group.trim().to_ascii_lowercase();
     let stripped = lower
         .strip_suffix(" components")
         .unwrap_or(lower.as_str())
         .trim();
     stripped.replace(' ', "-")
+}
+
+fn category_matches(page_cat: &str, query: &str) -> bool {
+    let q = query.trim();
+    if q.is_empty() {
+        return true;
+    }
+    page_cat.eq_ignore_ascii_case(q) || category_slug(page_cat) == category_slug(q)
+}
+
+fn list_query_hit(page: &Page, q: &str) -> bool {
+    page.id.to_ascii_lowercase().contains(q)
+        || page.title.to_ascii_lowercase().contains(q)
+        || page.tags.iter().any(|t| t.to_ascii_lowercase().contains(q))
+}
+
+fn list_row(page: &Page) -> ListRow {
+    ListRow {
+        id: page.id.clone(),
+        tag: page.tags.first().cloned().unwrap_or_default(),
+        pascal: page.pascals.first().cloned().unwrap_or_default(),
+        title: page.title.clone(),
+        kind: page.kind,
+        category: page.category.clone(),
+        site_url: page.site_url.clone(),
+        demo_count: page.demos.iter().filter(|d| !d.debug).count(),
+        prop_count: page
+            .apis
+            .iter()
+            .filter(|s| matches!(s.kind, ApiKind::Props | ApiKind::Properties))
+            .map(|s| s.rows.len())
+            .sum(),
+    }
+}
+
+fn owner_filter_for(page: &Page, query: &str) -> Option<String> {
+    let q = fold_ident(query);
+    if q.is_empty() {
+        return None;
+    }
+    let names = Names::from_kebab(&page.id);
+    if q == fold_ident(&page.id) || q == fold_ident(&names.tag) || q == fold_ident(&names.pascal) {
+        return None;
+    }
+    page.components
+        .iter()
+        .find(|owner| {
+            let n = Names::from_heading(owner);
+            fold_ident(owner) == q
+                || fold_ident(&n.kebab) == q
+                || fold_ident(&n.tag) == q
+                || fold_ident(&n.pascal) == q
+        })
+        .cloned()
+}
+
+fn fold_prop(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c != '-' && *c != '_')
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+fn page_search_body(page: &Page) -> String {
+    let mut s = page.description.clone();
+    for a in &page.alerts {
+        s.push('\n');
+        s.push_str(a);
+    }
+    if let Some(qa) = &page.qa_markdown {
+        s.push('\n');
+        s.push_str(qa);
+    }
+    for e in &page.extra_sections {
+        s.push('\n');
+        s.push_str(&e.heading);
+        s.push('\n');
+        s.push_str(&e.markdown);
+    }
+    s
+}
+
+fn score_page(page: &Page, tokens: &[String], q_debug: bool) -> Option<SearchHit> {
+    let mut score = 0u32;
+    let mut match_kind = String::new();
+    let mut snippet = String::new();
+    let mut from_prop = false;
+
+    let title = page.title.to_lowercase();
+    let id = page.id.to_lowercase();
+    let stem = id.replace('-', " ");
+    let category = page.category.to_lowercase();
+    let tags: Vec<String> = page.tags.iter().map(|t| t.to_lowercase()).collect();
+    let pascals: Vec<String> = page.pascals.iter().map(|t| t.to_lowercase()).collect();
+
+    for t in tokens {
+        if title.contains(t) {
+            score += 12;
+            set_if_empty(&mut match_kind, "title");
+        }
+        if id.contains(t) {
+            score += 10;
+            set_if_empty(&mut match_kind, "id");
+        }
+        if tags.iter().any(|x| x.contains(t)) {
+            score += 10;
+            set_if_empty(&mut match_kind, "tag");
+        }
+        if pascals.iter().any(|x| x.contains(t)) {
+            score += 10;
+            set_if_empty(&mut match_kind, "pascal");
+        }
+        if stem.contains(t) {
+            score += 10;
+            set_if_empty(&mut match_kind, "stem");
+        }
+        if category.contains(t) {
+            score += 4;
+            set_if_empty(&mut match_kind, "category");
+        }
+    }
+
+    let body = page_search_body(page);
+    let body_lc = body.to_lowercase();
+    let mut desc_matches = 0u32;
+    for t in tokens {
+        desc_matches += body_lc.matches(t.as_str()).count() as u32;
+    }
+    if desc_matches > 0 {
+        score += desc_matches.min(4);
+        set_if_empty(&mut match_kind, "description");
+    }
+
+    let mut type_desc = 0u32;
+    for sec in &page.apis {
+        if !matches!(sec.kind, ApiKind::Props | ApiKind::Properties) {
+            continue;
+        }
+        for row in &sec.rows {
+            let name = row.first().map(String::as_str).unwrap_or("");
+            let name_lc = name.to_ascii_lowercase();
+            let name_fold = fold_prop(name);
+            if tokens
+                .iter()
+                .any(|t| name_lc == *t || name_fold == fold_prop(t))
+            {
+                score += 14;
+                match_kind = format!("prop:{name}");
+                snippet = row.join(" | ");
+                from_prop = true;
+            }
+            if row.len() > 1 {
+                let rest = row[1..].join(" ").to_lowercase();
+                for t in tokens {
+                    if rest.contains(t) {
+                        type_desc += 1;
+                    }
+                }
+            }
+        }
+    }
+    score += type_desc.min(3);
+
+    for demo in &page.demos {
+        if demo.debug && !q_debug {
+            continue;
+        }
+        let file = demo.file_name.to_lowercase();
+        let title_d = demo.title.as_deref().unwrap_or("").to_lowercase();
+        for t in tokens {
+            if file.contains(t) || title_d.contains(t) {
+                score += 6;
+                if !from_prop {
+                    match_kind = format!("demo:{}", demo.file_name);
+                }
+            }
+        }
+    }
+
+    if score == 0 {
+        return None;
+    }
+    if page.kind == PageKind::Gotchas {
+        score += 50;
+    }
+    if page.kind == PageKind::Api {
+        score += 8;
+    }
+
+    let (snippet, truncated) = if from_prop {
+        clip_with_flag(&snippet, SNIPPET_LIMIT)
+    } else {
+        let (sn, tr) = snippet_from_body(&body, tokens);
+        if sn.is_empty() {
+            clip_with_flag(&page.description, SNIPPET_LIMIT)
+        } else {
+            (sn, tr)
+        }
+    };
+
+    Some(SearchHit {
+        id: page.id.clone(),
+        score,
+        kind: page.kind,
+        title: page.title.clone(),
+        tag: page.tags.first().cloned(),
+        pascal: page.pascals.first().cloned(),
+        site_url: page.site_url.clone(),
+        snippet,
+        match_kind,
+        truncated,
+    })
+}
+
+fn set_if_empty(slot: &mut String, v: &str) {
+    if slot.is_empty() {
+        slot.push_str(v);
+    }
+}
+
+fn snippet_from_body(body: &str, tokens: &[String]) -> (String, bool) {
+    let line = body.lines().find(|l| {
+        let lc = l.to_lowercase();
+        tokens.iter().any(|t| lc.contains(t))
+    });
+    match line {
+        Some(l) => clip_with_flag(l.trim(), SNIPPET_LIMIT),
+        None => (String::new(), false),
+    }
 }
 
 #[cfg(test)]
@@ -499,5 +882,48 @@ mod tests {
             map.get("button").map(String::as_str),
             Some("Common Components")
         );
+    }
+
+    #[test]
+    fn search_remote_hits_data_table_first() {
+        let cat = Catalog::load(&fixture_cache());
+        let (hits, _) = cat.search("remote", None, 8);
+        assert!(!hits.is_empty(), "expected hits for remote");
+        assert_eq!(hits[0].id, "data-table");
+        assert!(
+            hits[0].match_kind.starts_with("prop:"),
+            "{}",
+            hits[0].match_kind
+        );
+        assert!(hits[0].snippet.contains("remote"), "{}", hits[0].snippet);
+    }
+
+    #[test]
+    fn lookup_props_kebab_and_camel() {
+        let cat = Catalog::load(&fixture_cache());
+        let remote = cat.lookup_props("remote");
+        assert!(
+            remote.iter().any(|h| h.page_id == "data-table"),
+            "remote prop"
+        );
+        let kebab = cat.lookup_props("row-key");
+        let camel = cat.lookup_props("rowKey");
+        assert!(!kebab.is_empty());
+        assert_eq!(kebab.len(), camel.len());
+        assert!(kebab.iter().any(|h| h.page_id == "data-table"));
+    }
+
+    #[test]
+    fn resolve_n_datatable_and_list_button() {
+        let cat = Catalog::load(&fixture_cache());
+        match cat.resolve_page("n-datatable") {
+            PageResolve::Hit { page, .. } => assert_eq!(page.id, "data-table"),
+            other => panic!("expected data-table, got {other:?}"),
+        }
+        let rows = cat.list_rows(None, None, Some("button"));
+        assert!(rows.iter().any(|r| r.id == "button"), "{rows:?}");
+        let display = cat.list_rows(Some("data-display"), None, None);
+        assert!(display.iter().any(|r| r.id == "data-table"));
+        assert!(!display.iter().any(|r| r.id == "button"));
     }
 }

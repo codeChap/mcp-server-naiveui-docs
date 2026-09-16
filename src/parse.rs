@@ -96,6 +96,17 @@ pub struct NamedMarkdown {
     pub markdown: String,
 }
 
+pub fn parse_page_kind(s: &str) -> Option<PageKind> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "component" => Some(PageKind::Component),
+        "api" => Some(PageKind::Api),
+        "config" => Some(PageKind::Config),
+        "doc" | "docs" => Some(PageKind::Doc),
+        "gotchas" | "gotcha" => Some(PageKind::Gotchas),
+        _ => None,
+    }
+}
+
 pub fn page_kind(id: &str, source_path: &str) -> PageKind {
     if id == "gotchas" {
         return PageKind::Gotchas;

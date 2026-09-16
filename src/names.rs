@@ -184,6 +184,11 @@ fn strip_n_prefix(s: &str) -> &str {
     }
 }
 
+/// Alphanumeric lowercase id (`n-data-table`, `NDataTable`, `Data Table` → `datatable`).
+pub fn fold_ident(s: &str) -> String {
+    normalize_to_kebab(s).replace('-', "")
+}
+
 fn normalize_to_kebab(raw: &str) -> String {
     let stripped = strip_n_prefix(raw.trim());
     let mut out = String::new();
