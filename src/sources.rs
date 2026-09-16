@@ -174,7 +174,6 @@ pub fn is_safe_rel(rel: &str) -> bool {
     true
 }
 
-#[allow(dead_code)]
 pub fn is_safe_source_id(id: &str) -> bool {
     !id.is_empty()
         && !id.starts_with('-')

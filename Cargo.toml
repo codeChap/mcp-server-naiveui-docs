@@ -1,6 +1,6 @@
 [package]
 name = "mcp-server-naive-ui"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "MCP server: Naive UI component docs, APIs, and demos from the pinned library source"
 license = "MIT"

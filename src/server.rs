@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
+use regex::Regex;
 use rmcp::{
     ErrorData as McpError, ServerHandler, handler::server::tool::ToolRouter,
     handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
@@ -13,8 +14,9 @@ use crate::catalog::{Catalog, GOTCHAS_MD, PageResolve, PropHit};
 use crate::clip::{BODY_LIMIT, JSON_CAP, clip_with_flag, omit_until_fits, pretty_len};
 use crate::names::fold_ident;
 use crate::parse::{ApiKind, Page, PageKind, parse_page_kind};
-use crate::sources::{NAIVE_UI_PINNED_REV, clone_dir, is_safe_rel, resolve_rev};
+use crate::sources::{NAIVE_UI_PINNED_REV, clone_dir, is_safe_rel, is_safe_source_id, resolve_rev};
 use crate::sync::{ensure_sources, git_rev, read_mcp_origin, same_git_rev};
+use crate::theme;
 
 const LIST_CAP: usize = 200;
 const SEARCH_DEFAULT: u32 = 8;
@@ -92,6 +94,48 @@ pub struct GetParams {
     #[schemars(description = "Prose page id from search: docs/customize-theme or gotchas")]
     pub id: String,
 }
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ThemeParams {
+    #[schemars(
+        description = "Optional component id, tag, or Pascal. Omit for common + all components."
+    )]
+    #[serde(default)]
+    pub component: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct DiscreteParams {
+    #[schemars(
+        description = "Optional: message | dialog | notification | loadingBar | modal. modal is a related page, not a pin includes-union member."
+    )]
+    #[serde(default)]
+    pub include: Option<String>,
+}
+
+const DISCRETE_RELATED: &[(&str, &str, &str, &str)] = &[
+    ("message", "message", "useMessage", "n-message-provider"),
+    ("dialog", "dialog", "useDialog", "n-dialog-provider"),
+    (
+        "notification",
+        "notification",
+        "useNotification",
+        "n-notification-provider",
+    ),
+    (
+        "loadingBar",
+        "loading-bar",
+        "useLoadingBar",
+        "n-loading-bar-provider",
+    ),
+    ("modal", "modal", "useModal", "n-modal-provider"),
+];
+
+static INCLUDES_UNION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"includes:\s*Array<([^>]+)>").expect("includes union regex"));
+
+/// Compiled v2.40.4 gotcha: do not rewrite the pin's includes union to add `'modal'`.
+const MODAL_INCLUDES_GOTCHA: &str = "At pin v2.40.4 the published createDiscreteApi includes union is Array<'message' | 'dialog' | 'notification' | 'loadingBar'> — no 'modal' — even though the return type and options still have modal / modalProviderProps and the prose lists useModal. Do not add 'modal' to includes; IIFE agents would emit an include the pin’s types do not list.";
 
 #[derive(Clone)]
 struct SwapArc<T> {
@@ -410,6 +454,43 @@ impl NaiveUiServer {
             }))),
         }
     }
+
+    #[tool(
+        description = "Reader: common theme keys (literals only) and --n-* CSS vars from **/*.cssr.ts. Optional component= filter. Unfiltered overflow returns counts, still valid JSON. Does not resolve primaryColor to #18a058."
+    )]
+    async fn naive_theme(
+        &self,
+        Parameters(p): Parameters<ThemeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let cat = self.catalog.get();
+        let clone = clone_dir(&self.cache);
+        match p
+            .component
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            None => ok_json(&theme::theme_unfiltered(&clone)),
+            Some(name) => match resolve_theme_id(&cat, &clone, name) {
+                Ok(id) => ok_json(&theme::theme_filtered(&clone, &id)),
+                Err(e) => Ok(err(e)),
+            },
+        }
+    }
+
+    #[tool(
+        description = "Reader: createDiscreteApi (verbatim ts fence), includes union as published, caveats, related message/dialog/notification/loading-bar/modal pages. StackChap: call once in app.js. Optional include= message|dialog|notification|loadingBar|modal. Does not add 'modal' to the pin's includes union."
+    )]
+    async fn naive_discrete(
+        &self,
+        Parameters(p): Parameters<DiscreteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let cat = self.catalog.get();
+        match discrete_json(&cat, p.include.as_deref()) {
+            Ok(v) => ok_json(&v),
+            Err(e) => Ok(err(e)),
+        }
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -428,9 +509,12 @@ impl ServerHandler for NaiveUiServer {
                  3) Looking for a prop across the lib (remote, pagination)? naive_prop(name). \
                  4) Need a usage snippet? naive_component demos list, then naive_demo(component, name). \
                  On-disk files are *.demo.vue / *.demo.md, not the fence's basic.vue. \
-                 5) Prose guides and gotchas: naive_get(id) (docs/customize-theme, gotchas). \
+                 5) Toasts / confirms / loading bar outside setup: naive_discrete first. \
+                 StackChap: createDiscreteApi once; window.$message / $dialog / $notification. \
+                 6) Theme tokens / --n-* CSS vars: naive_theme(component?). \
+                 7) Prose guides and gotchas: naive_get(id) (docs/customize-theme, gotchas). \
                  Component ids: use naive_component, not naive_get. \
-                 6) Empty catalog / pin_match false: naive_sync. \
+                 8) Empty catalog / pin_match false: naive_sync. \
                  Templates use kebab tags (n-select). setup()/h() uses Pascal (NButton) from \
                  window.naive in IIFE apps. Prefer Naive over homemade dropdowns, tables, dialogs.",
             )
@@ -752,6 +836,154 @@ fn read_prose_file(cache: &Path, page: &Page) -> Result<String, String> {
     std::fs::read_to_string(&file).map_err(|_| format!("source not found: {rel}"))
 }
 
+fn resolve_theme_id(cat: &Catalog, clone: &Path, name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("empty component name".into());
+    }
+    if name.contains("..") || name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return Err(format!(
+            "invalid component name (path traversal rejected): {name:?}"
+        ));
+    }
+    match cat.resolve_page(name) {
+        PageResolve::Hit { page, .. } => Ok(page.id.clone()),
+        PageResolve::Candidates(c) => Err(format!(
+            "ambiguous component {name:?}; matches: {}",
+            c.join(", ")
+        )),
+        PageResolve::None { did_you_mean } => {
+            let id = theme::guess_component_id(name);
+            if !is_safe_source_id(&id) {
+                return Err(format!("invalid component name {name:?}"));
+            }
+            if clone.join("src").join(&id).is_dir() {
+                return Ok(id);
+            }
+            if !did_you_mean.is_empty() {
+                return Err(format!(
+                    "unknown component {name:?}; did_you_mean: {}",
+                    did_you_mean.join(", ")
+                ));
+            }
+            Ok(id)
+        }
+    }
+}
+
+fn parse_discrete_include(raw: &str) -> Result<Option<&'static str>, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    match s {
+        "message" => Ok(Some("message")),
+        "dialog" => Ok(Some("dialog")),
+        "notification" => Ok(Some("notification")),
+        "loadingBar" | "loading-bar" | "loadingbar" => Ok(Some("loadingBar")),
+        "modal" => Ok(Some("modal")),
+        _ => Err(format!(
+            "unknown include {s:?}; pass include= message | dialog | notification | loadingBar | modal"
+        )),
+    }
+}
+
+fn parse_includes_union(ts: &str) -> Vec<String> {
+    let Some(cap) = INCLUDES_UNION.captures(ts) else {
+        return Vec::new();
+    };
+    cap[1]
+        .split('|')
+        .filter_map(|part| {
+            let p = part.trim().trim_matches('\'').trim_matches('"').trim();
+            if p.is_empty() {
+                None
+            } else {
+                Some(p.to_string())
+            }
+        })
+        .collect()
+}
+
+fn discrete_json(cat: &Catalog, include: Option<&str>) -> Result<Value, String> {
+    let include = match include {
+        None => None,
+        Some(s) => parse_discrete_include(s)?,
+    };
+    let page = match cat.resolve_page("discrete") {
+        PageResolve::Hit { page, .. } => page,
+        PageResolve::Candidates(c) => {
+            return Err(format!(
+                "ambiguous discrete page; matches: {}",
+                c.join(", ")
+            ));
+        }
+        PageResolve::None { .. } => {
+            return Err(
+                "discrete page not indexed; call naive_sync, then naive_discrete / naive_component(\"discrete\")"
+                    .into(),
+            );
+        }
+    };
+    let signature_ts = page
+        .extra_types
+        .iter()
+        .find(|t| t.heading.contains("createDiscreteApi"))
+        .map(|t| t.body.clone())
+        .or_else(|| page.extra_types.first().map(|t| t.body.clone()))
+        .unwrap_or_default();
+    let includes_union = parse_includes_union(&signature_ts);
+    let mut caveats: Vec<String> = page.alerts.clone();
+    if !caveats
+        .iter()
+        .any(|c| c.contains("'modal'") || c.contains("includes union"))
+    {
+        caveats.push(MODAL_INCLUDES_GOTCHA.to_string());
+    }
+    let related: Vec<Value> = DISCRETE_RELATED
+        .iter()
+        .filter(|(inc, _, _, _)| include.is_none_or(|want| *inc == want))
+        .map(|(inc, id, hook, provider)| {
+            let in_union = includes_union.iter().any(|x| x == inc);
+            json!({
+                "id": id,
+                "hook": hook,
+                "provider": provider,
+                "site_url": format!("https://www.naiveui.com/en-US/os-theme/components/{id}"),
+                "in_includes_union": in_union,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "id": page.id,
+        "title": page.title,
+        "signature_ts": signature_ts,
+        "includes_union": includes_union,
+        "include": include,
+        "caveats": caveats,
+        "gotcha": MODAL_INCLUDES_GOTCHA,
+        "related": related,
+        "stackchap": {
+            "createDiscreteApi": "once",
+            "where": "app.js",
+            "assign": [
+                "window.$message",
+                "window.$dialog",
+                "window.$notification",
+                "window.$loadingBar",
+            ],
+            "do_not": [
+                "mount a second discrete API",
+                "call createDiscreteApi inside setup()",
+                "mix discrete API with useMessage in the same app",
+            ],
+        },
+        "site_url": page.site_url,
+        "source_path": page.source_path,
+        "truncated": false,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,8 +1013,8 @@ mod tests {
         let srv = fixture_server();
         let v = srv.status_json();
         assert_eq!(v["gotchas"], 1);
-        assert!(v["pages"].as_u64().unwrap() >= 5);
-        assert_eq!(v["components"], 3);
+        assert!(v["pages"].as_u64().unwrap() >= 6);
+        assert_eq!(v["components"], 4);
         assert_eq!(v["docs"], 1);
         assert!(v["missing"].as_array().unwrap().is_empty());
         assert_eq!(v["origin"], "archive");
@@ -844,7 +1076,9 @@ mod tests {
         assert!(v["body"].as_str().unwrap().contains("Customizing theme"));
         let gotchas = cat.get("gotchas").unwrap();
         let g = get_json(&cache, gotchas).expect("gotchas");
+        assert_eq!(g["id"], "gotchas");
         assert!(g["body"].as_str().unwrap().contains("createDiscreteApi"));
+        assert!(g["body"].as_str().unwrap().contains("'modal'"));
     }
 
     fn blank_page(id: &str) -> Page {
@@ -899,5 +1133,104 @@ mod tests {
         assert!(rows.iter().any(|r| r.id == "button"));
         let v = serde_json::to_value(&rows).unwrap();
         serde_json::from_str::<Value>(&serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn discrete_json_verbatim_no_modal_in_union() {
+        let cat = Catalog::load(&fixture_cache());
+        let v = discrete_json(&cat, None).expect("discrete");
+        let dump = serde_json::to_string(&v).unwrap();
+        assert!(dump.contains("createDiscreteApi"), "{dump}");
+        assert!(dump.contains("useMessage"), "{dump}");
+        let sig = v["signature_ts"].as_str().unwrap();
+        assert!(
+            !sig.contains("|'modal'|"),
+            "must not rewrite the pin includes union: {sig}"
+        );
+        let union = v["includes_union"].as_array().unwrap();
+        let names: Vec<&str> = union.iter().filter_map(|x| x.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["message", "dialog", "notification", "loadingBar"]
+        );
+        assert!(!names.contains(&"modal"));
+        assert!(
+            v["related"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["id"] == "modal" && r["in_includes_union"] == false)
+        );
+        assert_eq!(v["stackchap"]["where"], "app.js");
+        assert_eq!(v["stackchap"]["createDiscreteApi"], "once");
+        serde_json::from_str::<Value>(&serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn discrete_include_modal_points_at_page_not_union() {
+        let cat = Catalog::load(&fixture_cache());
+        let v = discrete_json(&cat, Some("modal")).expect("include=modal");
+        assert_eq!(v["include"], "modal");
+        let related = v["related"].as_array().unwrap();
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0]["id"], "modal");
+        assert_eq!(related[0]["hook"], "useModal");
+        assert_eq!(related[0]["in_includes_union"], false);
+        let union = v["includes_union"].as_array().unwrap();
+        assert!(!union.iter().any(|x| x.as_str() == Some("modal")));
+        let sig = v["signature_ts"].as_str().unwrap();
+        assert!(!sig.contains("|'modal'|"));
+        assert!(v["gotcha"].as_str().unwrap().contains("modal"));
+    }
+
+    #[test]
+    fn discrete_unknown_include_errors() {
+        let cat = Catalog::load(&fixture_cache());
+        let err = discrete_json(&cat, Some("toast")).unwrap_err();
+        assert!(err.contains("include="), "{err}");
+        assert!(!err.contains("|'modal'|"));
+    }
+
+    #[test]
+    fn naive_component_discrete_still_works() {
+        let cat = Catalog::load(&fixture_cache());
+        let page = cat.get("discrete").expect("discrete page");
+        let text = component_json(page, None, None).expect("json");
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["id"], "discrete");
+        assert_eq!(v["kind"], "api");
+        assert!(text.contains("createDiscreteApi"), "{text}");
+        assert!(!text.contains("|'modal'|"));
+    }
+
+    #[test]
+    fn theme_resolve_button_and_avatar_group() {
+        let cache = fixture_cache();
+        let cat = Catalog::load(&cache);
+        let clone = clone_dir(&cache);
+        assert_eq!(
+            resolve_theme_id(&cat, &clone, "n-button").unwrap(),
+            "button"
+        );
+        assert_eq!(resolve_theme_id(&cat, &clone, "NButton").unwrap(), "button");
+        assert_eq!(
+            resolve_theme_id(&cat, &clone, "avatar-group").unwrap(),
+            "avatar-group"
+        );
+        let err = resolve_theme_id(&cat, &clone, "../x").unwrap_err();
+        assert!(err.contains("traversal"), "{err}");
+    }
+
+    #[test]
+    fn gotchas_id_is_gotchas_and_searchable() {
+        let cat = Catalog::load(&fixture_cache());
+        let page = cat.get("gotchas").expect("gotchas");
+        assert_eq!(page.id, "gotchas");
+        assert_eq!(page.kind, PageKind::Gotchas);
+        let (hits, _) = cat.search("includes union modal", None, 8);
+        assert!(
+            hits.iter().any(|h| h.id == "gotchas"),
+            "gotchas must stay searchable: {hits:?}"
+        );
     }
 }

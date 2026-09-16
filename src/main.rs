@@ -5,6 +5,7 @@ mod parse;
 mod server;
 mod sources;
 mod sync;
+mod theme;
 
 use anyhow::Result;
 use rmcp::{ServiceExt, transport::stdio};

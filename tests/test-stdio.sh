@@ -20,6 +20,10 @@ env -u NAIVE_UI_MCP_REV -u NAIVE_UI_MCP_SYNC_ON_START \
 {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"naive_component","arguments":{"name":"button"}}}
 {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"naive_demo","arguments":{"component":"button","name":"basic"}}}
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"naive_demo","arguments":{"component":"button","name":"../x"}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"naive_theme","arguments":{"component":"button"}}}
+{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"naive_discrete","arguments":{}}}
+{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"naive_get","arguments":{"id":"gotchas"}}}
+{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"naive_component","arguments":{"name":"discrete"}}}
 EOF
 
 fail=0
@@ -50,10 +54,8 @@ check "tools/list includes naive_component" '"name"[[:space:]]*:[[:space:]]*"nai
 check "tools/list includes naive_prop" '"name"[[:space:]]*:[[:space:]]*"naive_prop"'
 check "tools/list includes naive_demo" '"name"[[:space:]]*:[[:space:]]*"naive_demo"'
 check "tools/list includes naive_get" '"name"[[:space:]]*:[[:space:]]*"naive_get"'
-
-for tool in naive_theme naive_discrete; do
-  absent "$tool" "\"name\"[[:space:]]*:[[:space:]]*\"${tool}\""
-done
+check "tools/list includes naive_theme" '"name"[[:space:]]*:[[:space:]]*"naive_theme"'
+check "tools/list includes naive_discrete" '"name"[[:space:]]*:[[:space:]]*"naive_discrete"'
 
 python3 - "$OUT" <<'PY' || fail=1
 import json, sys
@@ -121,17 +123,14 @@ want = {
     "naive_prop",
     "naive_demo",
     "naive_get",
+    "naive_theme",
+    "naive_discrete",
 }
 missing = sorted(want - names)
-extra = sorted(names & {"naive_discrete", "naive_theme"})
 if missing:
     bad("tools/list names", f" missing {missing}")
 else:
     ok("tools/list names for this PR")
-if extra:
-    bad("tools/list extra", f" {extra}")
-else:
-    ok("tools/list has no naive_discrete / naive_theme")
 
 # naive_list returns button (id=4)
 lst = messages.get(4)
@@ -199,6 +198,77 @@ else:
         ok("traversal name=../x errors")
     else:
         bad("traversal name=../x errors", f": {text[:400]}")
+
+# naive_theme button css vars (id=8)
+theme = messages.get(8)
+if not theme:
+    bad("naive_theme response missing")
+else:
+    text = content_text(theme)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as e:
+        bad("naive_theme JSON.parse", f": {e}")
+        payload = None
+    if payload is not None:
+        vars_ = payload.get("css_vars") or []
+        if "--n-text-color" in vars_ and "--n-border-color-xxx" not in vars_:
+            ok("naive_theme button has --n-text-color not xxx")
+        else:
+            bad("naive_theme css vars", f": {json.dumps(payload)[:400]}")
+
+# naive_discrete (id=9)
+disc = messages.get(9)
+if not disc:
+    bad("naive_discrete response missing")
+else:
+    text = content_text(disc)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as e:
+        bad("naive_discrete JSON.parse", f": {e}")
+        payload = None
+    if payload is not None:
+        dump = json.dumps(payload)
+        sig = payload.get("signature_ts") or ""
+        if "createDiscreteApi" in dump and "useMessage" in dump and "|'modal'|" not in sig:
+            ok("naive_discrete createDiscreteApi / useMessage, no |'modal'| in signature")
+        else:
+            bad("naive_discrete payload", f": {dump[:400]}")
+
+# naive_get gotchas (id=10)
+got = messages.get(10)
+if not got:
+    bad("naive_get gotchas response missing")
+else:
+    text = content_text(got)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as e:
+        bad("naive_get gotchas JSON.parse", f": {e}")
+        payload = None
+    if payload is not None:
+        if payload.get("id") == "gotchas":
+            ok("gotchas id is gotchas")
+        else:
+            bad("gotchas id", f": {json.dumps(payload)[:400]}")
+
+# naive_component discrete (id=11)
+compd = messages.get(11)
+if not compd:
+    bad("naive_component discrete response missing")
+else:
+    text = content_text(compd)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as e:
+        bad("naive_component discrete JSON.parse", f": {e}")
+        payload = None
+    if payload is not None:
+        if payload.get("id") == "discrete" and "createDiscreteApi" in json.dumps(payload):
+            ok("naive_component(discrete) still works")
+        else:
+            bad("naive_component discrete", f": {json.dumps(payload)[:400]}")
 
 sys.exit(fail)
 PY
