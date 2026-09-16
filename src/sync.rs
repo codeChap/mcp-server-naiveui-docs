@@ -109,17 +109,29 @@ pub fn ensure_sources(cache: &Path, force: bool) -> Result<String> {
     Ok(format!("[{REMOTE_ID}] {msg}"))
 }
 
+fn peel_rev(dir: &Path, rev: &str) -> Result<String> {
+    let spec = format!("{rev}^{{commit}}");
+    let out = git_run(Some(dir), ["rev-parse", "--verify", "--quiet", &spec])?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 fn checkout_existing(dir: &Path, rev: &str) -> Result<String> {
     if is_unpinned_rev(rev) {
         let msg = pull(dir)?;
         write_mcp_origin(dir, "git", rev)?;
         return Ok(msg);
     }
-    if let Ok(current) = git_rev(dir)
-        && same_git_rev(&current, rev)
-    {
-        write_mcp_origin(dir, "git", rev)?;
-        return Ok(format!("already at {current}"));
+    if let Ok(current) = git_rev(dir) {
+        if same_git_rev(&current, rev) {
+            write_mcp_origin(dir, "git", rev)?;
+            return Ok(format!("already at {current}"));
+        }
+        if let Ok(peeled) = peel_rev(dir, rev)
+            && same_git_rev(&current, &peeled)
+        {
+            write_mcp_origin(dir, "git", rev)?;
+            return Ok(format!("already at {current}"));
+        }
     }
     fetch_rev(dir, rev)?;
     git_run(Some(dir), ["checkout", "--detach", "FETCH_HEAD"])?;
@@ -552,14 +564,45 @@ fn run_cmd(cmd: Command, label: &str) -> Result<Output> {
     run_cmd_timeout(cmd, label, GIT_TIMEOUT)
 }
 
+fn kill_process_group(pid: u32) {
+    #[cfg(unix)]
+    {
+        let pg = format!("-{pid}");
+        let _ = Command::new("kill")
+            .args(["-KILL", &pg])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
 fn run_cmd_timeout(mut cmd: Command, label: &str, timeout: Duration) -> Result<Output> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let child = cmd.spawn().with_context(|| format!("{label} spawn"))?;
+    let pid = child.id();
     let (tx, rx) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let _ = tx.send(cmd.output());
+        let _ = tx.send(child.wait_with_output());
     });
     let out = match rx.recv_timeout(timeout) {
-        Ok(r) => r.with_context(|| format!("{label} spawn"))?,
-        Err(_) => bail!("{label} timed out after {}s", timeout.as_secs()),
+        Ok(r) => r.with_context(|| format!("{label} wait"))?,
+        Err(_) => {
+            // Reap before callers rm -rf dest and start archive/jsDelivr.
+            kill_process_group(pid);
+            let _ = rx.recv_timeout(Duration::from_secs(5));
+            bail!("{label} timed out after {}s", timeout.as_secs());
+        }
     };
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -574,6 +617,44 @@ fn run_cmd_timeout(mut cmd: Command, label: &str, timeout: Duration) -> Result<O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_cmd_timeout_kills_hung_child() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        let start = Instant::now();
+        let err = run_cmd_timeout(cmd, "sleep", Duration::from_millis(300)).unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(format!("{err:#}").contains("timed out"), "{err:#}");
+        assert!(
+            elapsed < Duration::from_secs(8),
+            "reap after kill took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn unique_naive_ui_root_v_strip_and_uniqueness() {
+        let tmp = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("unique-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("naive-ui-2.40.4")).unwrap();
+        std::fs::write(tmp.join("archive.tar.gz"), b"").unwrap();
+        let got = unique_naive_ui_root(&tmp).unwrap();
+        assert_eq!(got.file_name().unwrap(), "naive-ui-2.40.4");
+
+        std::fs::create_dir_all(tmp.join("naive-ui-v2.40.4")).unwrap();
+        assert!(unique_naive_ui_root(&tmp).is_err());
+
+        std::fs::remove_dir_all(tmp.join("naive-ui-2.40.4")).unwrap();
+        let got = unique_naive_ui_root(&tmp).unwrap();
+        assert_eq!(got.file_name().unwrap(), "naive-ui-v2.40.4");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn same_git_rev_accepts_prefix() {
