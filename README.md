@@ -1,5 +1,7 @@
 # mcp-server-naiveui-docs
 
+[![CI](https://github.com/codeChap/mcp-server-naiveui-docs/actions/workflows/ci.yml/badge.svg)](https://github.com/codeChap/mcp-server-naiveui-docs/actions/workflows/ci.yml)
+
 Local **stdio MCP** that indexes **Naive UI** component docs, APIs, and demos so an agent can look them up instead of guessing.
 
 This is not a Naive UI runtime. It clones/pulls the public [tusen-ai/naive-ui](https://github.com/tusen-ai/naive-ui) tree at a pinned tag and serves locator/reader tools over MCP. Query time is offline after one `sync`.

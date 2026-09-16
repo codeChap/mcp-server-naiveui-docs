@@ -4,6 +4,11 @@ version = "0.3.0"
 edition = "2024"
 description = "MCP server: Naive UI component docs, APIs, and demos from the pinned library source"
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/codeChap/mcp-server-naiveui-docs"
+homepage = "https://github.com/codeChap/mcp-server-naiveui-docs"
+keywords = ["mcp", "naive-ui", "vue"]
+categories = ["development-tools"]
 
 [dependencies]
 rmcp = { version = "1.8.0", features = ["server", "transport-io"] }
