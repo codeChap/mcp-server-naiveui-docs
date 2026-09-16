@@ -4,6 +4,7 @@ All notable changes to mcp-server-naiveui-docs.
 
 ## [Unreleased]
 
+- README rewrite. Numbered agent install (`cargo install`, required CLI `--sync`, register `naiveui-docs` with the path from `command -v`, `naive_status` health fields). Worked `n-data-table` lookup. Deduped MCP config / `cargo install`. Playbook unchanged.
 - Renamed crate, binary, cache dir, GitHub repo, and MCP server id from `mcp-server-naive-ui` / `naive-ui` to `mcp-server-naiveui-docs` / `naiveui-docs`. Indexed clone remains `{cache}/src/naive-ui`.
 
 ## [0.3.0] — 2026-09-16
