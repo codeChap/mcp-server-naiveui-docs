@@ -1,4 +1,4 @@
-# mcp-server-naive-ui
+# mcp-server-naiveui-docs
 
 Local **stdio MCP** that indexes **Naive UI** component docs, APIs, and demos so an agent can look them up instead of guessing.
 
@@ -29,20 +29,20 @@ Gotchas are compiled into the binary (`include_str!`), so `cargo install` still 
 
 ## Cache / pin / env
 
-Cache: `~/.cache/mcp-server-naive-ui` (override `NAIVE_UI_MCP_CACHE` or `XDG_CACHE_HOME`). `HOME` or `NAIVE_UI_MCP_CACHE` is required.
+Cache: `~/.cache/mcp-server-naiveui-docs` (override `NAIVE_UI_MCP_CACHE` or `XDG_CACHE_HOME`). `HOME` or `NAIVE_UI_MCP_CACHE` is required.
 
 **Naive pin:** `sync` checks out [tusen-ai/naive-ui](https://github.com/tusen-ai/naive-ui) at **`v2.40.4`** (StackChap `naive-ui.iife.js`). Override with `NAIVE_UI_MCP_REV=<tag|sha>` or `NAIVE_UI_MCP_REV=HEAD` to follow the default branch. See `naive_status`.
 
 | Env | Default | Notes |
 |---|---|---|
-| `NAIVE_UI_MCP_CACHE` | `$XDG_CACHE_HOME/mcp-server-naive-ui` or `$HOME/.cache/mcp-server-naive-ui` | Never `/tmp`, `/var/tmp`, `/dev/shm`, or a world-writable path/parent — **including** when the env is set. |
+| `NAIVE_UI_MCP_CACHE` | `$XDG_CACHE_HOME/mcp-server-naiveui-docs` or `$HOME/.cache/mcp-server-naiveui-docs` | Never `/tmp`, `/var/tmp`, `/dev/shm`, or a world-writable path/parent — **including** when the env is set. |
 | `NAIVE_UI_MCP_REV` | `v2.40.4` | Tag, SHA, or `HEAD`/`main`/`master` (unpinned). |
 | `NAIVE_UI_MCP_SYNC_ON_START` | unset | `1` clones on launch (slow first time). |
 | `RUST_LOG` | unset | Tracing is **stderr only** (stdout is MCP JSON-RPC). |
 
 CLI (not MCP): `--sync`, `--sync --force`, `--rebuild` (reparse markdown from the existing clone; **no network**).
 
-Clone path: `{cache}/src/naive-ui`. Stale sync lock: `rmdir ~/.cache/mcp-server-naive-ui/.sync.lock`.
+Clone path: `{cache}/src/naive-ui`. Stale sync lock: `rmdir ~/.cache/mcp-server-naiveui-docs/.sync.lock`.
 
 ## Playbook
 
@@ -67,12 +67,12 @@ Needs Rust (edition 2024) and `git` on `PATH`.
 cargo build --release
 ```
 
-Binary: `target/release/mcp-server-naive-ui`
+Binary: `target/release/mcp-server-naiveui-docs`
 
 Or:
 
 ```bash
-cargo install --git https://github.com/codeChap/mcp-server-naive-ui
+cargo install --git https://github.com/codeChap/mcp-server-naiveui-docs
 ```
 
 ## Test
@@ -86,11 +86,11 @@ cargo test
 
 ## MCP config (Grok / Claude / similar)
 
-Point the client at the built binary (stdio). Server id should be `naive-ui` so it is distinct from Naive UI the Vue library:
+Point the client at the built binary (stdio). Server id should be `naiveui-docs` so it is distinct from Naive UI the Vue library:
 
 ```toml
-[mcp_servers.naive-ui]
-command = "/path/to/mcp-server-naive-ui"
+[mcp_servers.naiveui-docs]
+command = "/path/to/mcp-server-naiveui-docs"
 enabled = true
 startup_timeout_sec = 60
 ```
@@ -111,7 +111,7 @@ The Grok skill lives **outside this crate** at `~/.grok/skills/naive-ui/SKILL.md
 
 Checklist (mirror `~/.grok/skills/gpui/SKILL.md`):
 
-1. Rewrite the skill to **call the `naive-ui` MCP first**. Do not invent props from training data or `web_fetch` naiveui.com.
+1. Rewrite the skill to **call the `naiveui-docs` MCP first**. Do not invent props from training data or `web_fetch` naiveui.com.
 2. Numbered playbook identical to `get_info` / this README.
 3. Keep **one** jsDelivr fallback sentence (pin `v2.40.4`); it is not the primary lookup.
 4. Keep StackChap product context the MCP does not replace: IIFE `window.naive`, kebab tags in templates, `n-config-provider` at the SPA root, `createDiscreteApi` once in `app.js`, `RemoteDataTable`, Glyphkit icons.

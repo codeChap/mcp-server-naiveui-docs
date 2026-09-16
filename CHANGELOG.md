@@ -1,6 +1,10 @@
 # Changelog
 
-All notable changes to mcp-server-naive-ui.
+All notable changes to mcp-server-naiveui-docs.
+
+## [Unreleased]
+
+- Renamed crate, binary, cache dir, GitHub repo, and MCP server id from `mcp-server-naive-ui` / `naive-ui` to `mcp-server-naiveui-docs` / `naiveui-docs`. Indexed clone remains `{cache}/src/naive-ui`.
 
 ## [0.3.0] — 2026-09-16
 
@@ -16,7 +20,7 @@ Dogfood cut. `tools/list` is ten tools; version stays **0.3.0** unless that list
 
 Operator checklist — rewrite `~/.grok/skills/naive-ui/SKILL.md` like the gpui skill:
 
-1. Call the `naive-ui` MCP first.
+1. Call the `naiveui-docs` MCP first.
 2. Playbook identical to README / `get_info`.
 3. Keep one jsDelivr fallback sentence at pin `v2.40.4`.
 4. Keep StackChap IIFE wiring (`window.naive`, `n-config-provider`, `createDiscreteApi` once, `RemoteDataTable`, Glyphkit).

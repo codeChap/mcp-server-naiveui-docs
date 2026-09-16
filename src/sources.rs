@@ -76,19 +76,19 @@ fn raw_cache_dir() -> Result<PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
         && !xdg.is_empty()
     {
-        return Ok(PathBuf::from(xdg).join("mcp-server-naive-ui"));
+        return Ok(PathBuf::from(xdg).join("mcp-server-naiveui-docs"));
     }
     if let Ok(home) = std::env::var("HOME")
         && !home.is_empty()
     {
         return Ok(PathBuf::from(home)
             .join(".cache")
-            .join("mcp-server-naive-ui"));
+            .join("mcp-server-naiveui-docs"));
     }
     if let Ok(local) = std::env::var("LOCALAPPDATA")
         && !local.is_empty()
     {
-        return Ok(PathBuf::from(local).join("mcp-server-naive-ui"));
+        return Ok(PathBuf::from(local).join("mcp-server-naiveui-docs"));
     }
     bail!("set NAIVE_UI_MCP_CACHE or HOME (refusing world-writable /tmp as a cache)");
 }

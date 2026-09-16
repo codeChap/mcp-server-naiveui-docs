@@ -8,9 +8,9 @@ cd "$(dirname "$0")/.."
 CACHE="${PWD}/tests/fixtures/tree"
 chmod 755 tests/fixtures "$CACHE" || true
 
-cargo build --quiet --bin mcp-server-naive-ui
+cargo build --quiet --bin mcp-server-naiveui-docs
 
-BIN="${PWD}/target/debug/mcp-server-naive-ui"
+BIN="${PWD}/target/debug/mcp-server-naiveui-docs"
 OUT="${PWD}/target/stdio-test.out"
 mkdir -p target
 
@@ -42,7 +42,7 @@ check() {
 }
 
 echo "stdio protocol:"
-check "initialize server name naive-ui" '"name"[[:space:]]*:[[:space:]]*"naive-ui"'
+check "initialize server name naiveui-docs" '"name"[[:space:]]*:[[:space:]]*"naiveui-docs"'
 check "tools/list includes naive_status" '"name"[[:space:]]*:[[:space:]]*"naive_status"'
 check "tools/list includes naive_sync" '"name"[[:space:]]*:[[:space:]]*"naive_sync"'
 check "tools/list includes naive_list" '"name"[[:space:]]*:[[:space:]]*"naive_list"'

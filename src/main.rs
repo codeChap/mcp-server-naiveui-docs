@@ -23,7 +23,7 @@ fn resolved_rev_label() -> String {
 
 fn print_counts(catalog: &Catalog, cache: &std::path::Path) {
     eprintln!(
-        "naive-ui mcp: {} pages ({} components, {} demos, {} docs, {} gotchas) from {} pin {}",
+        "naiveui-docs mcp: {} pages ({} components, {} demos, {} docs, {} gotchas) from {} pin {}",
         catalog.pages.len(),
         catalog.component_count(),
         catalog.demo_count(),
@@ -84,7 +84,7 @@ async fn main() -> Result<()> {
     if std::env::var("NAIVE_UI_MCP_SYNC_ON_START").ok().as_deref() == Some("1")
         && let Err(e) = ensure_sources(&cache, false)
     {
-        eprintln!("naive-ui mcp sync on start failed: {e:#}");
+        eprintln!("naiveui-docs mcp sync on start failed: {e:#}");
     }
 
     let catalog = Catalog::load(&cache);

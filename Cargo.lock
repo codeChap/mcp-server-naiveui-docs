@@ -304,7 +304,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mcp-server-naive-ui"
+name = "mcp-server-naiveui-docs"
 version = "0.3.0"
 dependencies = [
  "anyhow",
