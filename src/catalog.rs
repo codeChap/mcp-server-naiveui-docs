@@ -834,10 +834,15 @@ mod tests {
             cc.demos.iter().any(|d| d.file_name == "basic.demo.md"),
             "missing-demo fence still catalogs"
         );
-        assert_eq!(cat.component_count(), 4);
+        assert_eq!(cat.component_count(), 5);
         assert_eq!(cat.doc_count(), 1);
-        assert!(cat.pages.len() >= 6);
+        assert!(cat.pages.len() >= 7);
         assert!(cat.get("discrete").is_some());
+        assert!(cat.get("avatar").is_some());
+        assert_eq!(
+            cat.get("avatar-group").map(|p| p.id.as_str()),
+            Some("avatar")
+        );
         assert!(cat.get("_styles").is_none());
         assert!(cat.get("docs/customize-theme").is_some());
         let basic = button

@@ -846,6 +846,12 @@ fn resolve_theme_id(cat: &Catalog, clone: &Path, name: &str) -> Result<String, S
             "invalid component name (path traversal rejected): {name:?}"
         ));
     }
+    // Group dirs (avatar-group) have cssr but no demo-entry; catalog aliases them
+    // onto the parent page. Prefer an on-disk src/<kebab> over that alias.
+    let guessed = theme::guess_component_id(name);
+    if is_safe_source_id(&guessed) && clone.join("src").join(&guessed).is_dir() {
+        return Ok(guessed);
+    }
     match cat.resolve_page(name) {
         PageResolve::Hit { page, .. } => Ok(page.id.clone()),
         PageResolve::Candidates(c) => Err(format!(
@@ -853,12 +859,8 @@ fn resolve_theme_id(cat: &Catalog, clone: &Path, name: &str) -> Result<String, S
             c.join(", ")
         )),
         PageResolve::None { did_you_mean } => {
-            let id = theme::guess_component_id(name);
-            if !is_safe_source_id(&id) {
+            if !is_safe_source_id(&guessed) {
                 return Err(format!("invalid component name {name:?}"));
-            }
-            if clone.join("src").join(&id).is_dir() {
-                return Ok(id);
             }
             if !did_you_mean.is_empty() {
                 return Err(format!(
@@ -866,7 +868,7 @@ fn resolve_theme_id(cat: &Catalog, clone: &Path, name: &str) -> Result<String, S
                     did_you_mean.join(", ")
                 ));
             }
-            Ok(id)
+            Ok(guessed)
         }
     }
 }
@@ -1013,8 +1015,8 @@ mod tests {
         let srv = fixture_server();
         let v = srv.status_json();
         assert_eq!(v["gotchas"], 1);
-        assert!(v["pages"].as_u64().unwrap() >= 6);
-        assert_eq!(v["components"], 4);
+        assert!(v["pages"].as_u64().unwrap() >= 7);
+        assert_eq!(v["components"], 5);
         assert_eq!(v["docs"], 1);
         assert!(v["missing"].as_array().unwrap().is_empty());
         assert_eq!(v["origin"], "archive");
@@ -1213,10 +1215,28 @@ mod tests {
             "button"
         );
         assert_eq!(resolve_theme_id(&cat, &clone, "NButton").unwrap(), "button");
-        assert_eq!(
-            resolve_theme_id(&cat, &clone, "avatar-group").unwrap(),
-            "avatar-group"
+        match cat.resolve_page("avatar-group") {
+            PageResolve::Hit { page, .. } => assert_eq!(page.id, "avatar"),
+            other => panic!("catalog should alias avatar-group → avatar, got {other:?}"),
+        }
+        let id = resolve_theme_id(&cat, &clone, "avatar-group").unwrap();
+        assert_eq!(id, "avatar-group");
+        let v = theme::theme_filtered(&clone, &id);
+        let vars = v["css_vars"].as_array().unwrap();
+        let names: Vec<&str> = vars.iter().filter_map(|x| x.as_str()).collect();
+        assert!(names.contains(&"--n-gap"), "{names:?}");
+        assert!(
+            !names.contains(&"--n-merged-color"),
+            "must not glob avatar cssr for avatar-group: {names:?}"
         );
+        let avatar = theme::theme_filtered(&clone, "avatar");
+        let avatar_vars: Vec<&str> = avatar["css_vars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.as_str())
+            .collect();
+        assert!(avatar_vars.contains(&"--n-merged-color"), "{avatar_vars:?}");
         let err = resolve_theme_id(&cat, &clone, "../x").unwrap_err();
         assert!(err.contains("traversal"), "{err}");
     }
