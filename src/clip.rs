@@ -34,13 +34,13 @@ pub fn pretty_len(v: &Value) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-fn clip_object_strings(map: &mut Map<String, Value>, cap: usize) -> bool {
+fn clip_object_strings(map: &mut Map<String, Value>) -> bool {
     let mut any = false;
     for key in CLIP_KEYS {
         if let Some(Value::String(s)) = map.get_mut(*key)
-            && s.len() > cap
+            && s.len() > BODY_LIMIT
         {
-            *s = clip(s, cap);
+            *s = clip(s, BODY_LIMIT);
             any = true;
         }
     }
@@ -63,16 +63,17 @@ fn omit_demo_titles(map: &mut Map<String, Value>) -> bool {
 }
 
 /// Drop optional fields until pretty JSON is ≤ `cap`. Never slices the serialized document.
+/// String fields in CLIP_KEYS are clipped to BODY_LIMIT (below JSON_CAP), not to `cap`.
 pub fn omit_until_fits(mut value: Value, cap: usize) -> (Value, bool) {
     if pretty_len(&value) <= cap {
         return (value, false);
     }
     let mut truncated = false;
     if let Value::Object(map) = &mut value {
-        truncated |= clip_object_strings(map, cap);
+        truncated |= clip_object_strings(map);
     }
-    if truncated && pretty_len(&value) <= cap {
-        return (value, true);
+    if pretty_len(&value) <= cap {
+        return (value, truncated);
     }
     for key in OMIT_KEYS {
         let removed = match &mut value {
@@ -92,6 +93,9 @@ pub fn omit_until_fits(mut value: Value, cap: usize) -> (Value, bool) {
     };
     if stripped_titles {
         truncated = true;
+        if pretty_len(&value) <= cap {
+            return (value, true);
+        }
     }
     (value, truncated)
 }
@@ -156,15 +160,37 @@ mod tests {
 
     #[test]
     fn omit_until_fits_strips_demo_titles() {
+        let without = json!({
+            "id": "button",
+            "demos": [{"fence_id": "basic.vue"}],
+        });
+        let cap = pretty_len(&without) + 8;
         let v = json!({
             "id": "button",
             "demos": [{"fence_id": "basic.vue", "title": "Basic".repeat(40)}],
         });
-        let cap = 80;
+        assert!(pretty_len(&v) > cap);
         let (out, truncated) = omit_until_fits(v, cap);
         assert!(truncated);
         let title = out["demos"][0].get("title");
         assert!(title.is_none(), "{out}");
+        let s = serde_json::to_string_pretty(&out).unwrap();
+        assert!(s.len() <= cap, "{} > {cap}", s.len());
+        serde_json::from_str::<Value>(&s).unwrap();
+    }
+
+    #[test]
+    fn omit_until_fits_clips_description_to_body_limit_not_json_cap() {
+        let v = json!({
+            "id": "x",
+            "description": "d".repeat(JSON_CAP),
+        });
+        assert!(pretty_len(&v) > JSON_CAP);
+        let (out, truncated) = omit_until_fits(v, JSON_CAP);
+        assert!(truncated);
+        let desc = out["description"].as_str().unwrap();
+        assert!(desc.len() <= BODY_LIMIT, "{}", desc.len());
+        assert!(pretty_len(&out) <= JSON_CAP);
         serde_json::from_str::<Value>(&serde_json::to_string_pretty(&out).unwrap()).unwrap();
     }
 }

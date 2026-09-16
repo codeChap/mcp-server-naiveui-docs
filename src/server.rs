@@ -479,6 +479,12 @@ fn component_json(
         }
     }
     let (mut fitted, omitted) = omit_until_fits(value, JSON_CAP);
+    if section.is_none() && pretty_len(&fitted) > JSON_CAP {
+        return Err(format!(
+            "component JSON exceeds {JSON_CAP} bytes; pass section= one of: {}",
+            SECTIONS.join(", ")
+        ));
+    }
     if let Some(map) = fitted.as_object_mut() {
         let already = map
             .get("truncated")
@@ -594,13 +600,9 @@ fn demo_stem(name: &str) -> &str {
 }
 
 fn strip_suffix_ci<'a>(s: &'a str, suffix: &str) -> Option<&'a str> {
-    let sl = s.len();
-    let tl = suffix.len();
-    if sl >= tl && s[sl - tl..].eq_ignore_ascii_case(suffix) {
-        Some(&s[..sl - tl])
-    } else {
-        None
-    }
+    let at = s.len().checked_sub(suffix.len())?;
+    let rest = s.get(at..)?;
+    rest.eq_ignore_ascii_case(suffix).then_some(&s[..at])
 }
 
 fn demo_matches(demo: &crate::parse::DemoRef, name: &str) -> bool {
@@ -754,6 +756,7 @@ fn read_prose_file(cache: &Path, page: &Page) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::catalog::{Catalog, ListRow};
+    use crate::parse::DemoRef;
 
     fn fixture_cache() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tree")
@@ -817,6 +820,19 @@ mod tests {
     }
 
     #[test]
+    fn demo_utf8_stem_is_not_found_not_panic() {
+        let cache = fixture_cache();
+        let cat = Catalog::load(&cache);
+        let button = cat.get("button").unwrap();
+        let err = demo_json(&cache, button, "éxx").unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+        let err = pick_demo(button, "按a").unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+        let err = demo_json(&cache, button, "按a").unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+    }
+
+    #[test]
     fn get_rejects_component_id() {
         let cache = fixture_cache();
         let cat = Catalog::load(&cache);
@@ -829,6 +845,51 @@ mod tests {
         let gotchas = cat.get("gotchas").unwrap();
         let g = get_json(&cache, gotchas).expect("gotchas");
         assert!(g["body"].as_str().unwrap().contains("createDiscreteApi"));
+    }
+
+    fn blank_page(id: &str) -> Page {
+        Page {
+            id: id.into(),
+            title: id.into(),
+            description: String::new(),
+            kind: PageKind::Component,
+            tags: vec![format!("n-{id}")],
+            pascals: vec![],
+            components: vec![],
+            category: "Unlisted".into(),
+            site_url: String::new(),
+            source_path: String::new(),
+            version_hint: None,
+            demos: vec![],
+            apis: vec![],
+            extra_types: vec![],
+            alerts: vec![],
+            qa_markdown: None,
+            extra_sections: vec![],
+        }
+    }
+
+    #[test]
+    fn component_json_errors_when_still_over_after_omit() {
+        let mut page = blank_page("huge");
+        page.demos = (0..900)
+            .map(|i| DemoRef {
+                fence_id: format!("demo-{i:04}.vue"),
+                file_name: format!("demo-{i:04}.demo.vue"),
+                debug: false,
+                title: Some("Title".repeat(20)),
+            })
+            .collect();
+        let apis_only = serde_json::json!({ "apis": [] });
+        assert!(pretty_len(&apis_only) <= JSON_CAP);
+        let err = component_json(&page, None, None).unwrap_err();
+        assert!(err.contains("section="), "{err}");
+        assert!(
+            err.contains("48000") || err.contains(&JSON_CAP.to_string()),
+            "{err}"
+        );
+        let sliced = component_json(&page, None, Some("props")).expect("section= still JSON");
+        serde_json::from_str::<Value>(&sliced).unwrap();
     }
 
     #[test]
